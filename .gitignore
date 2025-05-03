@@ -1,2 +1,5 @@
 venv
 /agents/.env
+/agents/token
+/agents/credentials.json
+token.pickle
