@@ -3,3 +3,4 @@ venv
 /agents/token
 /agents/credentials.json
 token.pickle
+agents/credentials-old.json

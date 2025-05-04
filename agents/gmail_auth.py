@@ -11,12 +11,7 @@ from googleapiclient.errors import HttpError
 
 # --- Configuration ---
 # Define the scopes required by the main application
-SCOPES = [
-    'https://www.googleapis.com/auth/gmail.send',
-    'https://www.googleapis.com/auth/gmail.readonly'
-    #'https://www.googleapis.com/auth/drive.readonly',
-    #'https://www.googleapis.com/auth/calendar.readonly'
-]
+SCOPES = "https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/calendar.events.freebusy https://www.googleapis.com/auth/calendar.readonly https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/drive.readonly"
 
 # --- Resolve Paths Relative to This Script ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
