@@ -508,7 +508,7 @@ root_agent = Agent(
 )
 
 # --- Runner Setup ---
-APP_NAME = "gmail_agent_app"
+APP_NAME = "agents"
 USER_ID = "user_default" # Consistent user ID helps with token persistence
 SESSION_ID = "session_default" # Simple session management
 
