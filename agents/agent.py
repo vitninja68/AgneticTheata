@@ -442,21 +442,21 @@ list_labels_tool = FunctionTool(
 # --- Define ADK Agents ---
 # (Agent definitions remain unchanged)
 search_agent = Agent(
-    model='gemini-2.0-flash', # Using a specific model name - Flash is good for this
+    model='gemini-2.0-flash-lite', # Using a specific model name - Flash is good for this
     name='SearchAgent',
     instruction="You are a specialist in using Google Search to find information on the web. Use the provided 'google_search' tool effectively.",
     tools=[google_search],
 )
 
 coding_agent = Agent(
-    model='gemini-2.0-flash',
+    model='gemini-2.0-flash-lite',
     name='CodeAgent',
     instruction="You are a specialist in writing and executing Python code snippets to perform calculations, data manipulation, or other programmatic tasks using the 'built_in_code_execution' tool.",
     tools=[built_in_code_execution],
 )
 
 gmail_send_agent = Agent(
-    model='gemini-2.0-flash', # Use Flash for consistency, should be capable
+    model='gemini-2.0-flash-lite', # Use Flash for consistency, should be capable
     name='GmailSendAgent',
     instruction="""You are a specialist agent for sending emails using Gmail via the 'send_email' tool.
     - Your ONLY capability is sending emails.
@@ -468,7 +468,7 @@ gmail_send_agent = Agent(
 )
 
 gmail_read_agent = Agent(
-    model='gemini-2.0-flash', # Use Flash for consistency
+    model='gemini-2.0-flash-lite', # Use Flash for consistency
     name='GmailReadAgent',
     instruction="""You are a specialist agent for reading and searching emails and listing labels in Gmail.
     - Your capabilities are searching for emails using the 'search_emails' tool and listing labels using the 'list_labels' tool.
@@ -482,7 +482,7 @@ gmail_read_agent = Agent(
 
 root_agent = Agent(
     name="RootAgent",
-    model="gemini-2.0-flash", # Use Pro for potentially better routing/understanding
+    model="gemini-2.0-flash-lite", # Use Pro for potentially better routing/understanding
     instruction="""You are the main assistant coordinating tasks between specialist agents. Your capabilities include:
     - Performing web searches by delegating to the SearchAgent.
     - Executing code by delegating to the CodeAgent.
