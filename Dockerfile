@@ -5,7 +5,7 @@ RUN pip install  --no-cache-dir -r requirements.txt
 COPY . .
 EXPOSE 8000
 EXPOSE 8001
-COPY .env .
+#COPY .env .
 #CMD ["uvicorn", "server:mcp", "--host", "0.0.0.0", "--port", "8000"]
 RUN apk update && apk add --no-cache socat
 RUN echo '#!/bin/sh' > /start.sh && \
