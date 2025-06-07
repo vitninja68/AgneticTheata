@@ -1,0 +1,19 @@
+# --- MCP & FastMCP Framework ---
+mcp>=1.6.0                   # Model Context Protocol SDK
+mcp[cli]                     # MCP command-line interface
+fastmcp>=2.3.4               # Fast MCP server & client library
+
+# --- Google Authentication & APIs ---
+httpx                        # Async HTTP client, required by Google SDKs
+google-auth>=2.40.1          # Core Google Auth library
+google-auth-oauthlib>=1.2.2  # OAuth 2.0 client library for Google
+google-auth-httplib2>=0.1.0  # HTTPLib2 transport for Google Auth
+google-api-python-client>=2.60.0  # Discovery-based Google API client
+
+# --- Generative AI ---
+google-genai>=0.7.0          # Official Google GenAI SDK (Gemini)
+google-generativeai>=0.8.4   # Legacy Gemini SDK (deprecated Aug 31, 2025)
+google-adk                   # Google Agent Development Kit (installs google-generativeai)
+
+# --- Email Validation ---
+email-validator>=2.2.0       # Email syntax and deliverability checks
