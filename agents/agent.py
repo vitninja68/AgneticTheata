@@ -20,7 +20,7 @@ from google.adk.tools import (
     FunctionTool,
     agent_tool,
     google_search,
-    built_in_code_execution,
+    # built_in_code_execution,
 )
 from google.adk.sessions import InMemorySessionService
 from google.genai import types as adk_types # Renamed to avoid conflict with python types if any
@@ -448,12 +448,12 @@ search_agent = Agent(
     tools=[google_search],
 )
 
-coding_agent = Agent(
-    model='gemini-2.0-flash-lite',
-    name='CodeAgent',
-    instruction="You are a specialist in writing and executing Python code snippets to perform calculations, data manipulation, or other programmatic tasks using the 'built_in_code_execution' tool.",
-    tools=[built_in_code_execution],
-)
+# coding_agent = Agent(
+    # model='gemini-2.0-flash-lite',
+    # name='CodeAgent',
+    # instruction="You are a specialist in writing and executing Python code snippets to perform calculations, data manipulation, or other programmatic tasks using the 'built_in_code_execution' tool.",
+    # tools=[built_in_code_execution],
+# )
 
 gmail_send_agent = Agent(
     model='gemini-2.0-flash-lite', # Use Flash for consistency, should be capable
@@ -501,7 +501,7 @@ root_agent = Agent(
     Do NOT attempt to perform the authentication yourself or call the Gmail tools directly.""",
     tools=[ # List AgentTools for delegation
         agent_tool.AgentTool(agent=search_agent),
-        agent_tool.AgentTool(agent=coding_agent),
+        # agent_tool.AgentTool(agent=coding_agent),
         agent_tool.AgentTool(agent=gmail_send_agent), # Expose send agent as a tool
         agent_tool.AgentTool(agent=gmail_read_agent)  # Expose read agent as a tool
     ],
