@@ -350,7 +350,7 @@ search_agent = Agent(
 coding_agent = Agent(
     model='gemini-2.0-flash-lite', name='CodeAgent',
     instruction="You are a specialist in writing and executing Python code snippets.",
-    tools=[built_in_code_execution],
+    # tools=[built_in_code_execution],
 )
 gmail_send_agent = Agent(
     model='gemini-2.0-flash-lite', name='GmailSendAgent',
