@@ -26,7 +26,7 @@ from google.adk.tools import (
     FunctionTool,
     agent_tool,
     google_search,
-    built_in_code_execution,
+    # built_in_code_execution,
 )
 from google.adk.sessions import InMemorySessionService
 from google.genai import types as adk_types
@@ -346,6 +346,7 @@ search_agent = Agent(
     instruction="You are a specialist in using Google Search to find information on the web.",
     tools=[google_search],
 )
+
 coding_agent = Agent(
     model='gemini-2.0-flash-lite', name='CodeAgent',
     instruction="You are a specialist in writing and executing Python code snippets.",

@@ -4,3 +4,8 @@ google-auth-httplib2
 google-auth-oauthlib
 email-validator
 supabase
+httpx
+google-auth>=2.40.1          # Core Google Auth library
+google-auth-oauthlib>=1.2.2  # OAuth 2.0 client library for Google
+google-auth-httplib2>=0.1.0  # HTTPLib2 transport for Google Auth
+google-api-python-client>=2.60.0  # Discovery-based Google API client
