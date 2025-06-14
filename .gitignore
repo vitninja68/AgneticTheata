@@ -4,6 +4,4 @@ venv
 /agents/credentials.json
 token.pickle
 agents/credentials-old.json
-uv.lock
-.python-version
-#.env
+/.env
