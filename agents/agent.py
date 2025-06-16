@@ -5,7 +5,7 @@ import base64
 import pickle
 import logging
 import json
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from email.mime.text import MIMEText
 from typing import Optional, List, Dict, Any
 
@@ -26,16 +26,21 @@ from google.adk.tools import (
     FunctionTool,
     agent_tool,
     google_search,
-    # built_in_code_execution,
+    built_in_code_execution,
 )
 from google.adk.sessions import InMemorySessionService
 from google.genai import types as adk_types
 
 # --- Configuration ---
 load_dotenv()
+# Added new scopes for Profile, Calendar, and Drive
 SCOPES = [
+    'https://www.googleapis.com/auth/userinfo.email',
+    'https://www.googleapis.com/auth/userinfo.profile',
     'https://www.googleapis.com/auth/gmail.send',
-    'https://www.googleapis.com/auth/gmail.readonly'
+    'https://www.googleapis.com/auth/gmail.readonly',
+    'https://www.googleapis.com/auth/calendar.events',
+    'https://www.googleapis.com/auth/drive.metadata.readonly',
 ]
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TOKEN_PICKLE_FILE = os.path.join(SCRIPT_DIR, 'token.pickle')
@@ -47,7 +52,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%
 log = logging.getLogger(__name__)
 logging.getLogger('googleapiclient.discovery_cache').setLevel(logging.ERROR)
 logging.getLogger('google.auth.transport.requests').setLevel(logging.WARNING)
-logging.getLogger('httpx').setLevel(logging.WARNING) # Quieten supabase transport logs
+logging.getLogger('httpx').setLevel(logging.WARNING)
 
 # --- Custom Exception ---
 class AuthenticationNeededError(Exception):
@@ -70,22 +75,17 @@ def decrypt_token(encrypted_hex_str: Optional[str], key_bytes: bytes) -> Optiona
         decrypted_bytes = aesgcm.decrypt(nonce, ciphertext, None)
         return decrypted_bytes.decode('utf-8')
     except Exception as e:
-        log.error(f"Decryption failed. This could be due to an incorrect key or corrupted data. Error: {e}", exc_info=True)
+        log.error(f"Decryption failed: {e}", exc_info=True)
         return None
 
 def setup_google_authentication(user_id: str) -> str:
     """
-    Fetches, decrypts, and caches Google OAuth credentials for a given user_id from the backend database.
-    This tool MUST be called before any other Google tools (like Gmail) can be used.
-
-    Args:
-        user_id: The Supabase user ID for whom to fetch credentials.
-
-    Returns:
-        A success or error message string.
+    Fetches, decrypts, and caches Google OAuth credentials for a given user_id.
+    This tool MUST be called before any other Google tools can be used.
     """
     log.info(f"--- Starting Google Authentication Setup for user_id: {user_id} ---")
 
+    # Environment variable fetching and validation...
     db_host = os.getenv("BLUEPRINT_DB_HOST")
     db_schema = os.getenv("BLUEPRINT_DB_SCHEMA")
     supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
@@ -100,316 +100,429 @@ def setup_google_authentication(user_id: str) -> str:
     }
     for var, value in required_vars.items():
         if not value:
-            return f"Error: Server-side environment variable '{var}' is not set. Cannot proceed."
-
-    supabase_url = f"https://{db_host[3:]}" if db_host and db_host.startswith("db.") else None
-    if not supabase_url: return "Error: Server-side BLUEPRINT_DB_HOST format is incorrect."
+            return f"Error: Server-side environment variable '{var}' is not set."
 
     try:
         encryption_key = bytes.fromhex(hex_encryption_key)
-        if len(encryption_key) != 32: return "Error: Server-side TOKEN_ENCRYPTION_KEY must be 32 bytes when hex decoded."
-    except (ValueError, TypeError): return "Error: Server-side TOKEN_ENCRYPTION_KEY is not a valid hex string."
+    except (ValueError, TypeError):
+        return "Error: Server-side TOKEN_ENCRYPTION_KEY is not a valid hex string."
 
+    # Supabase connection and data fetching...
     try:
+        # --- FIX: Address SSL Hostname Mismatch ---
+        # The SSL certificate is valid for the API host (e.g., project-ref.supabase.co),
+        # not the direct DB host (e.g., db.project-ref.supabase.co).
+        # We must strip the "db." prefix if it exists to use the correct API endpoint.
+        api_host = db_host[3:] if db_host and db_host.startswith("db.") else db_host
+        supabase_url = f"https://{api_host}"
+        log.info(f"Connecting to Supabase at derived URL: {supabase_url}")
+        
         client_options = ClientOptions(schema=db_schema)
         supabase: Client = create_client(supabase_url, supabase_key, options=client_options)
-        table_name = 'user_google_tokens'; column_to_query = 'user_id'
-        log.info(f"Querying table '{table_name}' for user_id '{user_id}'")
-        response = supabase.table(table_name).select('*').eq(column_to_query, user_id).execute()
-        if not response.data: return f"Error: No Google authentication data found for user_id '{user_id}'. The user may need to log in and connect their Google account on the frontend."
+        response = supabase.table('user_google_tokens').select('*').eq('user_id', user_id).execute()
+        
+        if not response.data:
+            return f"Error: No Google authentication data found for user_id '{user_id}'."
         token_data = response.data[0]
     except Exception as e:
-        log.error(f"Error fetching data from Supabase: {e}", exc_info=True)
-        return f"Error: Could not connect to the backend database or fetch token data. Details: {e}"
+        return f"Error connecting to backend database: {e}"
 
+    # Decrypt tokens and create credentials object
     access_token = decrypt_token(token_data.get('encrypted_access_token'), encryption_key)
     refresh_token = decrypt_token(token_data.get('encrypted_refresh_token'), encryption_key)
-
     if not access_token:
-        return "Error: Failed to decrypt the Google access token. The server's encryption key may have changed or the data is corrupt."
-
-    expiry_dt = None
-    expiry_str = token_data.get('token_expiry')
-    if expiry_str:
-        try:
-            aware_dt = datetime.fromisoformat(expiry_str)
-            expiry_dt = aware_dt.replace(tzinfo=None)
-        except (ValueError, TypeError):
-            log.warning(f"Could not parse expiry timestamp '{expiry_str}'.")
+        return "Error: Failed to decrypt the Google access token."
 
     creds = Credentials(
         token=access_token, refresh_token=refresh_token,
         token_uri=GOOGLE_TOKEN_URI, client_id=google_client_id,
-        client_secret=google_client_secret, scopes=token_data.get('scopes'),
-        expiry=expiry_dt
+        client_secret=google_client_secret, scopes=token_data.get('scopes')
     )
 
+    # Save credentials to local pickle file
     try:
-        # Before saving, remove the old file if it exists to ensure a clean state
         if os.path.exists(TOKEN_PICKLE_FILE):
             os.remove(TOKEN_PICKLE_FILE)
         with open(TOKEN_PICKLE_FILE, 'wb') as token_file:
             pickle.dump(creds, token_file)
-        log.info(f"Successfully saved credentials to '{TOKEN_PICKLE_FILE}' for user '{user_id}'.")
-        return f"Success! Google authentication is now set up for user {user_id}. You can now proceed with Google-related tasks."
+        return f"Success! Google authentication is now set up for user {user_id}."
     except Exception as e:
-        log.error(f"Error saving credentials to pickle file: {e}", exc_info=True)
-        return f"Error: Could not save the fetched credentials locally. Details: {e}"
+        return f"Error saving credentials locally: {e}"
 
-# --- Refactored Google Authentication Helpers ---
+# --- Refactored Google Authentication & Service Helpers ---
 
-def load_or_refresh_credentials():
-    """
-    Loads credentials from token.pickle. If expired, attempts to refresh.
-    Raises AuthenticationNeededError if the file does not exist.
-    """
+def load_or_refresh_credentials() -> Credentials:
+    """Loads and refreshes credentials, raising AuthenticationNeededError if unavailable."""
     if not os.path.exists(TOKEN_PICKLE_FILE):
-        raise AuthenticationNeededError(f"'{TOKEN_PICKLE_FILE}' not found. The 'setup_google_authentication' tool must be run first.")
-    
+        raise AuthenticationNeededError(f"'{TOKEN_PICKLE_FILE}' not found. Run 'setup_google_authentication' first.")
+
     with open(TOKEN_PICKLE_FILE, 'rb') as token:
         creds = pickle.load(token)
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            log.info("Credentials expired. Attempting to refresh...")
+            log.info("Credentials expired. Refreshing...")
             creds.refresh(Request())
             with open(TOKEN_PICKLE_FILE, 'wb') as token:
                 pickle.dump(creds, token)
-            log.info("Credentials refreshed and saved.")
+            log.info("Credentials refreshed.")
         else:
-            raise AuthenticationNeededError("Credentials are invalid and cannot be refreshed. Please run 'setup_google_authentication' again.")
+            raise AuthenticationNeededError("Credentials invalid and cannot be refreshed. Run setup again.")
     return creds
 
-def get_gmail_service():
-    """Creates and returns an authenticated Gmail API service object."""
-    log.info("Building new Gmail service object...")
-    credentials = load_or_refresh_credentials() # This can now raise AuthenticationNeededError
-    service = build('gmail', 'v1', credentials=credentials, cache_discovery=False)
-    log.info("New Gmail service object built successfully.")
+def get_google_api_service(service_name: str, version: str):
+    """Generic factory for creating an authenticated Google API service object."""
+    log.info(f"Building new '{service_name}' v'{version}' service object...")
+    credentials = load_or_refresh_credentials()
+    service = build(service_name, version, credentials=credentials, cache_discovery=False)
+    log.info(f"Successfully built '{service_name}' service object.")
     return service
 
-# --- Gmail API Functions (Tools) ---
+# --- API Tool Functions (Gmail, User Profile, Calendar, Drive) ---
 
-def _parse_email_body(payload: Dict[str, Any]) -> (str, List[Dict[str, Any]]):
-    """Helper function to recursively parse email payload for body and attachments."""
-    body = ""
-    attachments = []
-    if "parts" in payload:
-        for part in payload["parts"]:
-            # Recursively parse nested parts (for multipart/alternative, etc.)
-            nested_body, nested_attachments = _parse_email_body(part)
-            if nested_body and not body: # Prioritize plain text from nested parts
-                body = nested_body
-            attachments.extend(nested_attachments)
-
-            # Find plain text body at the current level
-            if part.get("mimeType") == "text/plain" and "data" in part.get("body", {}):
-                body = base64.urlsafe_b64decode(part["body"]["data"]).decode("utf-8")
-            
-            # Find attachments
-            if part.get("filename"):
-                attachment_info = {
-                    "filename": part["filename"],
-                    "mime_type": part["mimeType"],
-                    "size_bytes": part["body"].get("size")
-                }
-                attachments.append(attachment_info)
-
-    elif "body" in payload and "data" in payload["body"]:
-        if payload.get("mimeType") == "text/plain":
-            body = base64.urlsafe_b64decode(payload["body"]["data"]).decode("utf-8")
-            
-    return body, attachments
-
-def get_email_details(message_id: str) -> dict | str:
-    """
-    Retrieves the full body and attachment details of a specific email by its ID.
-    First, use 'search_emails' to find the ID of the email you want to read.
-
-    Args:
-        message_id: The ID of the email message to retrieve.
-
-    Returns:
-        A dictionary containing the email's subject, sender, body, and a list of attachments,
-        or an error message string on failure.
-    """
-    if not message_id or not message_id.strip():
-        return "Error: A message_id must be provided."
+# User Profile Tool
+def get_user_profile() -> dict | str:
+    """Retrieves the authenticated user's profile information (name, email, picture)."""
     try:
-        service = get_gmail_service()
-        msg = service.users().messages().get(userId='me', id=message_id, format='full').execute()
-        
-        payload = msg.get('payload', {})
-        headers = {h['name'].lower(): h['value'] for h in payload.get('headers', [])}
-        
-        body, attachments = _parse_email_body(payload)
-        
+        service = get_google_api_service('oauth2', 'v2')
+        user_info = service.userinfo().get().execute()
         return {
-            "id": msg.get("id"),
-            "subject": headers.get("subject", "N/A"),
-            "from": headers.get("from", "N/A"),
-            "date": headers.get("date", "N/A"),
-            "snippet": msg.get("snippet", "").strip(),
-            "body": body.strip() if body else "[No plain text body found]",
-            "attachments": attachments
+            "email": user_info.get("email"), "name": user_info.get("name"),
+            "given_name": user_info.get("given_name"), "family_name": user_info.get("family_name"),
+            "picture": user_info.get("picture"),
         }
     except AuthenticationNeededError as e:
-        return f"Error: Authentication is not set up. Please tell me your user ID so I can run the authentication setup tool first. Details: {e}"
+        return f"Error: Authentication needed. Please provide your user ID to run setup. Details: {e}"
     except HttpError as error:
-        log.error(f'An HTTP error occurred getting email details: {error}', exc_info=True)
-        return f"Error: A Google API error occurred getting email details. Details: {error}"
+        return f"Error: Google API HTTP error getting user profile: {error}"
     except Exception as e:
-        log.error(f'An unexpected error occurred getting email details: {e}', exc_info=True)
-        return f"Error: An unexpected error occurred. Details: {e}"
+        return f"Error: An unexpected error occurred getting user profile: {e}"
 
-def send_email(to: str, subject: str, body: str) -> str:
-    """Sends an email using the authenticated Gmail account."""
-    try:
-        validate_email(to, check_deliverability=False)
-        service = get_gmail_service()
-        message = MIMEText(body)
-        message['to'] = to
-        message['subject'] = subject
-        message['from'] = 'me'
-        raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
-        sent_message = service.users().messages().send(userId='me', body={'raw': raw_message}).execute()
-        return f"Success! Email sent to {to}. Message ID: {sent_message['id']}"
-    except EmailNotValidError as e:
-        return f"Error: Invalid recipient email address format: {e}"
-    except AuthenticationNeededError as e:
-        return f"Error: Authentication is not set up. Please tell me your user ID so I can run the authentication setup tool first. Details: {e}"
-    except HttpError as error:
-        log.error(f'An HTTP error occurred while sending email: {error}', exc_info=True)
-        return f"Error: A Google API error occurred while sending email. Details: {error}"
-    except Exception as e:
-        log.error(f'An unexpected error occurred while sending email: {e}', exc_info=True)
-        return f"Error: An unexpected error occurred. Details: {e}"
+# Gmail Tools
+def _execute_email_search(query: str, max_results: int, label_ids: Optional[List[str]], include_spam_trash: bool) -> list[dict] | str:
+    """Internal helper to execute Gmail search."""
+    service = get_google_api_service('gmail', 'v1')
+    params = {
+        'userId': 'me',
+        'q': query,
+        'maxResults': min(max_results, 50),
+        'includeSpamTrash': include_spam_trash
+    }
+    if label_ids:
+        params['labelIds'] = label_ids
 
-def search_emails(query: str, max_results: int = 10) -> list[dict] | str:
-    """Searches for emails in the authenticated user's Gmail account."""
-    if not query or not query.strip():
-        return "Error: A search query must be provided."
-    try:
-        service = get_gmail_service()
-        result = service.users().messages().list(userId='me', q=query, maxResults=min(max_results, 50)).execute()
-        messages = result.get('messages', [])
-        if not messages: return f"No emails found matching your query: '{query}'"
-        
-        email_details = []
-        for msg_summary in messages:
-            msg_id = msg_summary.get('id')
-            if not msg_id: continue
-            msg = service.users().messages().get(userId='me', id=msg_id, format='metadata', metadataHeaders=['subject', 'from', 'date']).execute()
-            headers = {h['name'].lower(): h['value'] for h in msg.get('payload', {}).get('headers', [])}
-            email_details.append({
-                "id": msg.get('id'), "snippet": msg.get('snippet', '').strip(),
+    result = service.users().messages().list(**params).execute()
+    messages = result.get('messages', [])
+    if not messages: return f"No emails found for query: '{query}'"
+
+    details = []
+    for msg in messages:
+        if msg_id := msg.get('id'):
+            m = service.users().messages().get(userId='me', id=msg_id, format='metadata', metadataHeaders=['subject', 'from', 'date']).execute()
+            headers = {h['name'].lower(): h['value'] for h in m.get('payload', {}).get('headers', [])}
+            details.append({
+                "id": m.get('id'), "snippet": m.get('snippet', '').strip(),
                 "subject": headers.get('subject', 'N/A'), "from": headers.get('from', 'N/A'),
                 "date": headers.get('date', 'N/A')
             })
-        return email_details
-    except AuthenticationNeededError as e:
-        return f"Error: Authentication is not set up. Please tell me your user ID so I can run the authentication setup tool first. Details: {e}"
-    except HttpError as error:
-        log.error(f'An HTTP error occurred during email search: {error}', exc_info=True)
-        return f"Error: A Google API error occurred during email search. Details: {error}"
-    except Exception as e:
-        log.error(f'An unexpected error occurred during email search: {e}', exc_info=True)
-        return f"Error: An unexpected error occurred. Details: {e}"
+    return details
 
-def list_labels() -> list[dict] | str:
-    """Lists all labels (folders) in the authenticated user's Gmail account."""
+def search_emails(query: str, max_results: int = 10, label_ids: Optional[List[str]] = None, include_spam_trash: bool = False) -> list[dict] | str:
+    """
+    Searches emails with a Gmail query string (e.g., 'from:x', 'subject:y', 'is:unread').
+    Can also filter by label_ids (e.g., ['INBOX', 'UNREAD']) and include spam/trash.
+    To search for the 'last N emails', provide an empty query string.
+    """
+    if query is None:
+        return "Error: A search query string must be provided, even if empty."
+    # Handle "last N emails" case by removing the query string for a general search
+    if "last" in query.lower() and "email" in query.lower():
+        query = "" # Search all emails, rely on max_results
     try:
-        service = get_gmail_service()
-        results = service.users().labels().list(userId='me').execute()
-        labels = results.get('labels', [])
-        if not labels: return "No labels found."
-        return [{"id": lbl['id'], "name": lbl['name'], "type": lbl.get('type', 'user')} for lbl in labels]
+        return _execute_email_search(query, max_results, label_ids, include_spam_trash)
     except AuthenticationNeededError as e:
-        return f"Error: Authentication is not set up. Please tell me your user ID so I can run the authentication setup tool first. Details: {e}"
-    except HttpError as error:
-        log.error(f'An HTTP error occurred while listing labels: {error}', exc_info=True)
-        return f"Error: A Google API error occurred while listing labels. Details: {error}"
+        return f"Error: Authentication needed. {e}"
     except Exception as e:
-        log.error(f'An unexpected error occurred while listing labels: {e}', exc_info=True)
-        return f"Error: An unexpected error occurred. Details: {e}"
+        return f"Error during email search: {e}"
+
+def search_emails_by_date(comparison: str, year: int, month: int, day: int, max_results: int = 10) -> list[dict] | str:
+    """Searches for emails 'before' or 'after' a specific date (YYYY-MM-DD)."""
+    if comparison not in ['before', 'after']:
+        return "Error: 'comparison' must be 'before' or 'after'."
+    try:
+        dt = datetime(year, month, day, tzinfo=timezone.utc)
+        query = f"{comparison}:{int(dt.timestamp())}"
+        return _execute_email_search(query, max_results, None, False)
+    except (ValueError, TypeError) as e:
+        return f"Error: Invalid date values provided: {e}"
+    except AuthenticationNeededError as e:
+        return f"Error: Authentication needed. {e}"
+    except Exception as e:
+        return f"Error during date-based email search: {e}"
+
+def get_email_details(message_id: str) -> dict | str:
+    """Retrieves full body/attachments of a specific email by its ID."""
+    if not message_id: return "Error: message_id must be provided."
+    try:
+        service = get_google_api_service('gmail', 'v1')
+        msg = service.users().messages().get(userId='me', id=message_id, format='full').execute()
+        payload = msg.get('payload', {})
+        headers = {h['name'].lower(): h['value'] for h in payload.get('headers', [])}
+
+        body, attachments = "", []
+        if "parts" in payload:
+            for part in payload.get('parts', []):
+                if part.get("mimeType") == "text/plain" and "data" in part.get("body", {}):
+                    body = base64.urlsafe_b64decode(part["body"]["data"]).decode("utf-8")
+                if part.get("filename"):
+                    attachments.append({"filename": part["filename"], "mime_type": part["mimeType"]})
+        elif "body" in payload and payload.get("mimeType") == "text/plain":
+            body = base64.urlsafe_b64decode(payload["body"]["data"]).decode("utf-8")
+
+        return {
+            "id": msg.get("id"), "subject": headers.get("subject"), "from": headers.get("from"),
+            "date": headers.get("date"), "snippet": msg.get("snippet"),
+            "body": body.strip() or "[No plain text body found]", "attachments": attachments
+        }
+    except Exception as e: return f"Error getting email details: {e}"
+
+def send_email(to: str, subject: str, body: str) -> str:
+    """Sends an email."""
+    try:
+        validate_email(to)
+        service = get_google_api_service('gmail', 'v1')
+        message = MIMEText(body)
+        message['to'], message['subject'], message['from'] = to, subject, 'me'
+        raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
+        sent = service.users().messages().send(userId='me', body={'raw': raw_message}).execute()
+        return f"Success! Email sent to {to}. Message ID: {sent['id']}"
+    except Exception as e: return f"Error sending email: {e}"
+
+def read_email(query: str) -> dict | str:
+    """
+    Finds and reads the content of the single most recent email matching a search query.
+    For example: "latest email from mom", "email from 'boss@acme.com' with subject 'report'".
+    """
+    log.info(f"Reading email with query: '{query}'")
+    try:
+        # Search for the most recent email matching the query.
+        search_result = search_emails(query=query, max_results=1)
+
+        # Check if the search returned a list of emails
+        if isinstance(search_result, list) and search_result:
+            message_id = search_result[0].get('id')
+            if message_id:
+                log.info(f"Found email with ID: {message_id}. Fetching details...")
+                # Get the full details of that single email
+                return get_email_details(message_id)
+            else:
+                return "Error: Search found an email but it has no ID."
+        # Check if search returned an error message string
+        elif isinstance(search_result, str):
+            return f"Could not find an email to read. Search result: {search_result}"
+        else:
+            return f"Could not find any email matching the query: '{query}'"
+
+    except AuthenticationNeededError as e:
+        return f"Error: Authentication needed. {e}"
+    except Exception as e:
+        log.error(f"An unexpected error occurred in read_email: {e}", exc_info=True)
+        return f"An unexpected error occurred while trying to read the email: {e}"
+
+
+# Calendar Tools
+def search_calendar_events(query: Optional[str] = None, time_min: Optional[str] = None, time_max: Optional[str] = None, single_events: bool = True, max_results: int = 10) -> list[dict] | str:
+    """
+    Searches events on the user's primary calendar. Can filter by query, time_min, and time_max.
+    If time_min is not provided, it defaults to the current time to find upcoming events.
+    Datetimes MUST be in ISO 8601 format (e.g., '2025-06-15T15:00:00-07:00' or '2025-06-16T10:00:00Z').
+    """
+    try:
+        service = get_google_api_service('calendar', 'v3')
+        
+        # Default to now if time_min is not specified to find upcoming events
+        effective_time_min = time_min if time_min else datetime.utcnow().isoformat() + 'Z'
+
+        params = {
+            'calendarId': 'primary',
+            'timeMin': effective_time_min,
+            'maxResults': max_results,
+            'singleEvents': single_events,
+            'orderBy': 'startTime'
+        }
+        if time_max:
+            params['timeMax'] = time_max
+        if query:
+            params['q'] = query
+
+        events_result = service.events().list(**params).execute()
+        events = events_result.get('items', [])
+        if not events: return "No events found matching the criteria."
+
+        event_list = []
+        for event in events:
+            start = event['start'].get('dateTime', event['start'].get('date'))
+            end = event['end'].get('dateTime', event['end'].get('date'))
+            event_list.append({
+                "summary": event.get("summary", "No Title"),
+                "start": start, "end": end, "location": event.get("location", "N/A")
+            })
+        return event_list
+    except Exception as e: return f"Error listing calendar events: {e}"
+
+def create_calendar_event(summary: str, start_datetime: str, end_datetime: str, description: str = '', location: str = '') -> dict | str:
+    """
+    Creates a new event on the user's primary Google Calendar.
+    IMPORTANT: Datetimes MUST be in ISO 8601 format (e.g., '2025-06-15T15:00:00-07:00').
+    """
+    try:
+        service = get_google_api_service('calendar', 'v3')
+        event = {
+            'summary': summary, 'location': location, 'description': description,
+            'start': {'dateTime': start_datetime, 'timeZone': 'UTC'},
+            'end': {'dateTime': end_datetime, 'timeZone': 'UTC'},
+        }
+        created_event = service.events().insert(calendarId='primary', body=event).execute()
+        return {"status": "success", "event_link": created_event.get('htmlLink')}
+    except Exception as e: return f"Error creating calendar event: {e}"
+
+# Drive Tools
+def list_drive_files(query: str = '', max_results: int = 15) -> list[dict] | str:
+    """
+    Lists files and folders in Google Drive. Can filter with a query.
+    Example queries: "name contains 'report'", "mimeType='application/vnd.google-apps.folder'".
+    """
+    try:
+        service = get_google_api_service('drive', 'v3')
+        results = service.files().list(
+            q=query, pageSize=max_results,
+            fields="nextPageToken, files(id, name, mimeType, modifiedTime)"
+        ).execute()
+        items = results.get('files', [])
+        if not items: return "No files found in Google Drive matching the query."
+        return [{
+            "id": item['id'], "name": item['name'], "type": item['mimeType'],
+            "last_modified": item['modifiedTime']
+        } for item in items]
+    except Exception as e: return f"Error listing Drive files: {e}"
+
+def get_drive_file_metadata(file_id: str) -> dict | str:
+    """Gets detailed metadata for a specific file or folder in Google Drive by its ID."""
+    if not file_id:
+        return "Error: A file_id must be provided."
+    try:
+        service = get_google_api_service('drive', 'v3')
+        fields = "id, name, mimeType, modifiedTime, createdTime, owners(displayName, emailAddress), webViewLink, iconLink"
+        file_metadata = service.files().get(fileId=file_id, fields=fields).execute()
+        return file_metadata
+    except AuthenticationNeededError as e:
+        return f"Error: Authentication needed. {e}"
+    except HttpError as error:
+        if error.resp.status == 404:
+            return f"Error: File with ID '{file_id}' not found."
+        return f"Error: Google API HTTP error getting file metadata: {error}"
+    except Exception as e:
+        return f"Error getting Drive file metadata: {e}"
+
 
 # --- Create ADK FunctionTools ---
 setup_google_auth_tool = FunctionTool(func=setup_google_authentication)
+get_user_profile_tool = FunctionTool(func=get_user_profile)
 send_email_tool = FunctionTool(func=send_email)
+read_email_tool = FunctionTool(func=read_email)
 search_emails_tool = FunctionTool(func=search_emails)
+search_emails_by_date_tool = FunctionTool(func=search_emails_by_date)
 get_email_details_tool = FunctionTool(func=get_email_details)
-list_labels_tool = FunctionTool(func=list_labels)
+search_calendar_events_tool = FunctionTool(func=search_calendar_events)
+create_calendar_event_tool = FunctionTool(func=create_calendar_event)
+list_drive_files_tool = FunctionTool(func=list_drive_files)
+get_drive_file_metadata_tool = FunctionTool(func=get_drive_file_metadata)
+
 
 # --- Define ADK Agents ---
-search_agent = Agent(
-    model='gemini-2.0-flash-lite', name='SearchAgent',
-    instruction="You are a specialist in using Google Search to find information on the web.",
-    tools=[google_search],
-)
+# General Purpose Agents
+search_agent = Agent(name="SearchAgent", model='gemini-2.0-flash-lite', tools=[google_search])
+coding_agent = Agent(name="CodeAgent", model='gemini-2.0-flash-lite', tools=[built_in_code_execution])
 
-coding_agent = Agent(
-    model='gemini-2.0-flash-lite', name='CodeAgent',
-    instruction="You are a specialist in writing and executing Python code snippets.",
-    # tools=[built_in_code_execution],
-)
-gmail_send_agent = Agent(
-    model='gemini-2.0-flash-lite', name='GmailSendAgent',
-    instruction="You are a specialist agent for sending emails using the 'send_email' tool. You must have all arguments: 'to', 'subject', and 'body'.",
-    tools=[send_email_tool],
-)
+# Specialized Google Service Agents
+user_profile_agent = Agent(name="UserProfileAgent", model='gemini-2.0-flash-lite', tools=[get_user_profile_tool])
+gmail_send_agent = Agent(name="GmailSendAgent", model='gemini-2.0-flash-lite', tools=[send_email_tool])
+
 gmail_read_agent = Agent(
+    name="GmailReadAgent",
     model='gemini-2.0-flash-lite',
-    name='GmailReadAgent',
-    instruction="""You are a specialist agent for reading and searching emails and listing labels in Gmail.
+    instruction="Reads the content of the single most recent email matching a search query (e.g., 'read my latest email from Bob').",
+    tools=[read_email_tool]
+)
 
-Your capabilities are:
-1.  `search_emails`: To find emails using a query. This returns a list of email summaries including their ID.
-2.  `get_email_details`: To read the full content and see attachments of a SINGLE email using its `message_id`.
-3.  `list_labels`: To list all available email folders/labels.
+gmail_search_agent = Agent(
+    name="GmailSearchAgent",
+    model='gemini-2.0-flash-lite',
+    instruction="Search for a LIST of emails using text or date. To find the 'last 5 emails', use `search_emails` with max_results=5 and an empty query string.",
+    tools=[search_emails_tool, search_emails_by_date_tool]
+)
 
-**WORKFLOW FOR READING AN EMAIL (VERY IMPORTANT):**
-You MUST follow this two-step process to read an email's content:
-1.  **SEARCH**: The user will ask to find an email. Use `search_emails` with a precise query to locate it. This gives you the `message_id`.
-2.  **GET DETAILS**: Use the `get_email_details` tool with the `message_id` you received from the search results to retrieve the email's full content.
+gmail_get_email_agent = Agent(
+    name="GmailGetEmailAgent",
+    model='gemini-2.0-flash-lite',
+    instruction="Use the message_id from a previous search to fetch a single email's full content.",
+    tools=[get_email_details_tool]
+)
 
-**EXAMPLE WORKFLOW**:
--   User: "Read the latest email from jane@example.com"
--   Your FIRST action: Call `search_emails(query='from:jane@example.com', max_results=1)`
--   Tool returns: `[{'id': '123xyz', 'snippet': 'Hi, please see the report attached...'}]`
--   Your SECOND action: Call `get_email_details(message_id='123xyz')`
--   Tool returns the full email body and attachments. You then present this to the user.
-
-**CRITICAL RULES**:
--   For `search_emails`, you MUST extract the search phrase from the user's request for the 'query' argument.
--   Do NOT call `get_email_details` without first getting a `message_id` from `search_emails`.
--   If the user's request is ambiguous, ask for clarification.
-""",
-    tools=[search_emails_tool, get_email_details_tool, list_labels_tool],
+calendar_read_agent = Agent(name="CalendarReadAgent", model='gemini-2.0-flash-lite', tools=[search_calendar_events_tool])
+calendar_write_agent = Agent(name="CalendarWriteAgent", model='gemini-2.0-flash-lite', tools=[create_calendar_event_tool])
+drive_search_agent = Agent(name="DriveSearchAgent", model='gemini-2.0-flash-lite', tools=[list_drive_files_tool])
+drive_get_file_agent = Agent(
+    name="DriveGetFileAgent",
+    model='gemini-2.0-flash-lite',
+    instruction="Use the file_id from a search to fetch a single file's full metadata.",
+    tools=[get_drive_file_metadata_tool]
 )
 
 root_agent = Agent(
     name="RootAgent",
     model="gemini-2.0-flash-lite",
-    instruction="""You are the main assistant coordinating tasks.
-    - For web searches, delegate to SearchAgent.
-    - For code execution, delegate to CodeAgent.
-    - For sending emails, delegate to GmailSendAgent.
-    - For reading/searching emails, listing labels, and getting full email content, delegate to the GmailReadAgent. The GmailReadAgent is responsible for the multi-step process of searching and then reading email content.
+    instruction="""You are the main coordinator. Your job is to understand the user's request and delegate to the correct specialist agent.
 
-    *** VERY IMPORTANT: GOOGLE AUTHENTICATION WORKFLOW ***
-    To use any Google tool (like Gmail), you MUST first ensure authentication is set up for the user.
-    1. The user's prompt will contain a session context like `(Context: The user_id for this session is 'some-uuid-string')`. You MUST extract this `user_id`.
-    2. Before using ANY Gmail tool, you MUST first call the `setup_google_authentication` tool, passing the extracted `user_id` as an argument.
-    3. ONLY AFTER `setup_google_authentication` returns a success message can you proceed to call the requested Gmail tool (e.g., by delegating to the GmailReadAgent or GmailSendAgent).
-    4. If the user asks "read my last email from 'boss@example.com'" and the context provides user_id 'abc-123', your ABSOLUTE FIRST action must be to call `setup_google_authentication(user_id='abc-123')`. In the next turn, after success, you will delegate to the `GmailReadAgent` to perform the search and read steps.
-    5. If a Gmail tool fails with an authentication error, tell the user there was a problem and that you are trying to re-authenticate, then call `setup_google_authentication` again.
+    *** AUTHENTICATION WORKFLOW (MANDATORY) ***
+    1.  The user's prompt will contain a context like `(Context: The user_id is 'some-uuid')`.
+    2.  Before using ANY Google tool, you MUST call `setup_google_authentication` with that `user_id`.
+    3.  Only after successful authentication can you delegate to a specialist agent.
+
+    *** DELEGATION RULES ***
+    -   For Web or Google search use : `SearchAgent`.
+    -   For Code execution: `CodeAgent`.
+    -   Get user info (name, email): `UserProfileAgent`.
+    -   To read the content of the most recent email matching a search query (e.g., "read my last email from bob"): `GmailReadAgent`.
+    -   To get a LIST of emails matching a query (e.g., "show me the last 5 emails from HR"): `GmailSearchAgent`.
+    -   To read a specific email when you already have its message ID: `GmailGetEmailAgent`.
+    -   Send an email: `GmailSendAgent`.
+    -   List or search calendar events: `CalendarReadAgent`.
+    -   Create a calendar event: `CalendarWriteAgent`.
+    -   List or search for files in Drive: `DriveSearchAgent`.
+    -   Get details for a specific file in Drive: `DriveGetFileAgent`.
+
+    *** MULTI-STEP WORKFLOWS ***
+    -   **Reading Specific Emails from a List**: If the user asks to see a list of emails first ("show me my unread emails") and then wants to read one, you must follow this sequence:
+        1.  Delegate to `GmailSearchAgent` to get the list of emails and their `message_id`s.
+        2.  Present the list to the user.
+        3.  Once the user specifies which one to read, delegate to `GmailGetEmailAgent` with the chosen `message_id`.
+    -   **Simple Email Reading**: For direct requests to read an email ("read my latest email from Acme Inc."), delegate directly to `GmailReadAgent`.
+    -   **Reading Drive Files**: First, delegate to `DriveSearchAgent` to find the file and get its `id`. Second, delegate to `DriveGetFileAgent` with that `id` to get its details.
     """,
     tools=[
         setup_google_auth_tool,
+        agent_tool.AgentTool(agent=gmail_read_agent),
+        agent_tool.AgentTool(agent=gmail_search_agent),
+        agent_tool.AgentTool(agent=gmail_get_email_agent),
+        agent_tool.AgentTool(agent=calendar_read_agent),
+        agent_tool.AgentTool(agent=calendar_write_agent),
+        agent_tool.AgentTool(agent=drive_search_agent),
+        agent_tool.AgentTool(agent=drive_get_file_agent),
         agent_tool.AgentTool(agent=search_agent),
         agent_tool.AgentTool(agent=coding_agent),
+        agent_tool.AgentTool(agent=user_profile_agent),
         agent_tool.AgentTool(agent=gmail_send_agent),
-        agent_tool.AgentTool(agent=gmail_read_agent)
     ],
 )
 
@@ -420,58 +533,45 @@ runner = Runner(agent=root_agent, app_name=APP_NAME, session_service=session_ser
 
 # --- Agent Interaction Loop (Demo) ---
 def run_conversation():
-    print("\n--- Google Auth Integrated Agent ---")
-    
-    # In a real server, this would come from the incoming request.
-    # For this demo, we'll use a hardcoded Supabase user ID.
+    print("\n--- Google Services Super-Agent ---")
     user_id_for_session = os.getenv("DEMO_SUPABASE_USER_ID", "default-demo-user-id-not-set")
     if user_id_for_session == "default-demo-user-id-not-set":
-        print("WARNING: DEMO_SUPABASE_USER_ID environment variable not set. Using a placeholder.")
-    
-    # Create a persistent session for this demo run
+        print("WARNING: DEMO_SUPABASE_USER_ID environment variable not set.")
+
     adk_user_id = "demo_user"
     adk_session_id = "demo_session_123"
     session_service.create_session(app_name=APP_NAME, user_id=adk_user_id, session_id=adk_session_id)
-    print(f"Running demo session for Supabase User ID: '{user_id_for_session}'")
-    print("Agent is ready. Type 'quit' to exit.")
+    print(f"Session ready for Supabase User ID: '{user_id_for_session}'")
+    print("Example prompts: 'What's my name?', 'Read my last 3 emails', 'What are my next 5 calendar events?', 'List my files in Drive'.")
+    print("Type 'quit' to exit.")
     print("-" * 30)
 
     while True:
         try:
             query = input("You: ")
-            if query.strip().lower() == 'quit':
-                print("Exiting agent.")
-                break
-            if not query.strip():
-                continue
+            if query.strip().lower() == 'quit': break
+            if not query.strip(): continue
 
             print("Agent thinking...")
-
-            # Augment the user's query with the necessary context for the agent
             augmented_query = f"{query}\n\n(Context: The user_id for this session is '{user_id_for_session}')"
-            
             content = adk_types.Content(role='user', parts=[adk_types.Part(text=augmented_query)])
             events = runner.run(user_id=adk_user_id, session_id=adk_session_id, new_message=content)
 
-            final_response_text = ""
+            final_response = "[Agent finished without a text response]"
             for event in events:
                 if event.is_final_response():
-                    final_response_text = "".join(part.text for part in event.content.parts if part.text)
-                    if not final_response_text:
-                         final_response_text = "[Agent finished processing, but no text response was generated]"
+                    final_response = "".join(part.text for part in event.content.parts if part.text)
                     break
 
-            print("\nAgent Response:")
-            print(final_response_text)
+            print(f"\nAgent Response:\n{final_response}")
             print("-" * 30)
 
-        except KeyboardInterrupt:
-             print("\nExiting agent due to keyboard interrupt.")
-             break
+        except KeyboardInterrupt: break
         except Exception as e:
-             log.error(f"An unexpected error occurred in the main loop: {e}", exc_info=True)
-             print(f"\nERROR: An unexpected issue occurred. Please check the logs. Details: {e}")
-             print("-" * 30)
+             log.error(f"FATAL ERROR in main loop: {e}", exc_info=True)
+             print(f"\nERROR: An unexpected issue occurred: {e}")
+
+    print("Exiting agent.")
 
 if __name__ == "__main__":
     run_conversation()
