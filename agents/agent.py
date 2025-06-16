@@ -406,36 +406,12 @@ list_drive_files_tool = FunctionTool(func=list_drive_files)
 get_drive_file_metadata_tool = FunctionTool(func=get_drive_file_metadata)
 
 
-# --- Define ADK Agents ---
-<<<<<<< Updated upstream
-search_agent = Agent(
-    model='gemini-2.0-flash-lite', name='SearchAgent',
-    instruction="You are a specialist in using Google Search to find information on the web.",
-    tools=[google_search],
-)
-
-coding_agent = Agent(
-    model='gemini-2.0-flash-lite', name='CodeAgent',
-    instruction="You are a specialist in writing and executing Python code snippets.",
-    # tools=[built_in_code_execution],
-)
-gmail_send_agent = Agent(
-    model='gemini-2.0-flash-lite', name='GmailSendAgent',
-    instruction="You are a specialist agent for sending emails using the 'send_email' tool. You must have all arguments: 'to', 'subject', and 'body'.",
-    tools=[send_email_tool],
-)
-gmail_read_agent = Agent(
-=======
-# General Purpose Agents
 search_agent = Agent(name="SearchAgent", model='gemini-2.0-flash-lite', tools=[google_search])
 coding_agent = Agent(name="CodeAgent", model='gemini-2.0-flash-lite', tools=[built_in_code_execution])
-
-# Specialized Google Service Agents
 user_profile_agent = Agent(name="UserProfileAgent", model='gemini-2.0-flash-lite', tools=[get_user_profile_tool])
 gmail_send_agent = Agent(name="GmailSendAgent", model='gemini-2.0-flash-lite', tools=[send_email_tool])
 gmail_search_agent = Agent(
     name="GmailSearchAgent",
->>>>>>> Stashed changes
     model='gemini-2.0-flash-lite',
     instruction="Search emails using text or date. To find the 'last 5 emails', use `search_emails` with max_results=5 and an empty query string.",
     tools=[search_emails_tool, search_emails_by_date_tool]
