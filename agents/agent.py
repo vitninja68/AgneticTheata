@@ -298,6 +298,38 @@ def send_email(to: str, subject: str, body: str) -> str:
         return f"Success! Email sent to {to}. Message ID: {sent['id']}"
     except Exception as e: return f"Error sending email: {e}"
 
+def read_email(query: str) -> dict | str:
+    """
+    Finds and reads the content of the single most recent email matching a search query.
+    For example: "latest email from mom", "email from 'boss@acme.com' with subject 'report'".
+    """
+    log.info(f"Reading email with query: '{query}'")
+    try:
+        # Search for the most recent email matching the query.
+        search_result = search_emails(query=query, max_results=1)
+
+        # Check if the search returned a list of emails
+        if isinstance(search_result, list) and search_result:
+            message_id = search_result[0].get('id')
+            if message_id:
+                log.info(f"Found email with ID: {message_id}. Fetching details...")
+                # Get the full details of that single email
+                return get_email_details(message_id)
+            else:
+                return "Error: Search found an email but it has no ID."
+        # Check if search returned an error message string
+        elif isinstance(search_result, str):
+            return f"Could not find an email to read. Search result: {search_result}"
+        else:
+            return f"Could not find any email matching the query: '{query}'"
+
+    except AuthenticationNeededError as e:
+        return f"Error: Authentication needed. {e}"
+    except Exception as e:
+        log.error(f"An unexpected error occurred in read_email: {e}", exc_info=True)
+        return f"An unexpected error occurred while trying to read the email: {e}"
+
+
 # Calendar Tools
 def search_calendar_events(query: Optional[str] = None, time_min: Optional[str] = None, time_max: Optional[str] = None, single_events: bool = True, max_results: int = 10) -> list[dict] | str:
     """
@@ -397,6 +429,7 @@ def get_drive_file_metadata(file_id: str) -> dict | str:
 setup_google_auth_tool = FunctionTool(func=setup_google_authentication)
 get_user_profile_tool = FunctionTool(func=get_user_profile)
 send_email_tool = FunctionTool(func=send_email)
+read_email_tool = FunctionTool(func=read_email)
 search_emails_tool = FunctionTool(func=search_emails)
 search_emails_by_date_tool = FunctionTool(func=search_emails_by_date)
 get_email_details_tool = FunctionTool(func=get_email_details)
@@ -414,18 +447,28 @@ coding_agent = Agent(name="CodeAgent", model='gemini-2.0-flash-lite', tools=[bui
 # Specialized Google Service Agents
 user_profile_agent = Agent(name="UserProfileAgent", model='gemini-2.0-flash-lite', tools=[get_user_profile_tool])
 gmail_send_agent = Agent(name="GmailSendAgent", model='gemini-2.0-flash-lite', tools=[send_email_tool])
+
+gmail_read_agent = Agent(
+    name="GmailReadAgent",
+    model='gemini-2.0-flash-lite',
+    instruction="Reads the content of the single most recent email matching a search query (e.g., 'read my latest email from Bob').",
+    tools=[read_email_tool]
+)
+
 gmail_search_agent = Agent(
     name="GmailSearchAgent",
     model='gemini-2.0-flash-lite',
-    instruction="Search emails using text or date. To find the 'last 5 emails', use `search_emails` with max_results=5 and an empty query string.",
+    instruction="Search for a LIST of emails using text or date. To find the 'last 5 emails', use `search_emails` with max_results=5 and an empty query string.",
     tools=[search_emails_tool, search_emails_by_date_tool]
 )
+
 gmail_get_email_agent = Agent(
     name="GmailGetEmailAgent",
     model='gemini-2.0-flash-lite',
-    instruction="Use the message_id from a search to fetch a single email's full content.",
+    instruction="Use the message_id from a previous search to fetch a single email's full content.",
     tools=[get_email_details_tool]
 )
+
 calendar_read_agent = Agent(name="CalendarReadAgent", model='gemini-2.0-flash-lite', tools=[search_calendar_events_tool])
 calendar_write_agent = Agent(name="CalendarWriteAgent", model='gemini-2.0-flash-lite', tools=[create_calendar_event_tool])
 drive_search_agent = Agent(name="DriveSearchAgent", model='gemini-2.0-flash-lite', tools=[list_drive_files_tool])
@@ -447,23 +490,29 @@ root_agent = Agent(
     3.  Only after successful authentication can you delegate to a specialist agent.
 
     *** DELEGATION RULES ***
-    -   Web search: `SearchAgent`.
-    -   Code execution: `CodeAgent`.
+    -   For Web or Google search use : `SearchAgent`.
+    -   For Code execution: `CodeAgent`.
     -   Get user info (name, email): `UserProfileAgent`.
+    -   To read the content of the most recent email matching a search query (e.g., "read my last email from bob"): `GmailReadAgent`.
+    -   To get a LIST of emails matching a query (e.g., "show me the last 5 emails from HR"): `GmailSearchAgent`.
+    -   To read a specific email when you already have its message ID: `GmailGetEmailAgent`.
     -   Send an email: `GmailSendAgent`.
-    -   Search for emails (by text, date, or 'last N'): `GmailSearchAgent`.
-    -   Read a specific email's content (after getting an ID): `GmailGetEmailAgent`.
     -   List or search calendar events: `CalendarReadAgent`.
     -   Create a calendar event: `CalendarWriteAgent`.
     -   List or search for files in Drive: `DriveSearchAgent`.
     -   Get details for a specific file in Drive: `DriveGetFileAgent`.
 
     *** MULTI-STEP WORKFLOWS ***
-    -   **Reading Emails**: First, delegate to `GmailSearchAgent` to find the email and get its `message_id`. Second, delegate to `GmailGetEmailAgent` with the `message_id` to read the content.
+    -   **Reading Specific Emails from a List**: If the user asks to see a list of emails first ("show me my unread emails") and then wants to read one, you must follow this sequence:
+        1.  Delegate to `GmailSearchAgent` to get the list of emails and their `message_id`s.
+        2.  Present the list to the user.
+        3.  Once the user specifies which one to read, delegate to `GmailGetEmailAgent` with the chosen `message_id`.
+    -   **Simple Email Reading**: For direct requests to read an email ("read my latest email from Acme Inc."), delegate directly to `GmailReadAgent`.
     -   **Reading Drive Files**: First, delegate to `DriveSearchAgent` to find the file and get its `id`. Second, delegate to `DriveGetFileAgent` with that `id` to get its details.
     """,
     tools=[
         setup_google_auth_tool,
+        agent_tool.AgentTool(agent=gmail_read_agent),
         agent_tool.AgentTool(agent=gmail_search_agent),
         agent_tool.AgentTool(agent=gmail_get_email_agent),
         agent_tool.AgentTool(agent=calendar_read_agent),
@@ -474,7 +523,6 @@ root_agent = Agent(
         agent_tool.AgentTool(agent=coding_agent),
         agent_tool.AgentTool(agent=user_profile_agent),
         agent_tool.AgentTool(agent=gmail_send_agent),
-        
     ],
 )
 
