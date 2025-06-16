@@ -489,7 +489,6 @@ root_agent = Agent(
 
     *** DELEGATION RULES ***
     -   For Web or Google search use : `SearchAgent`.
-    -   For Code execution: `CodeAgent`.
     -   Get user info (name, email): `UserProfileAgent`.
     -   To read the content of the most recent email matching a search query (e.g., "read my last email from bob"): `GmailReadAgent`.
     -   To get a LIST of emails matching a query (e.g., "show me the last 5 emails from HR"): `GmailSearchAgent`.
@@ -518,7 +517,7 @@ root_agent = Agent(
         agent_tool.AgentTool(agent=drive_search_agent),
         agent_tool.AgentTool(agent=drive_get_file_agent),
         agent_tool.AgentTool(agent=search_agent),
-        agent_tool.AgentTool(agent=coding_agent),
+        #agent_tool.AgentTool(agent=coding_agent),
         agent_tool.AgentTool(agent=user_profile_agent),
         agent_tool.AgentTool(agent=gmail_send_agent),
     ],
