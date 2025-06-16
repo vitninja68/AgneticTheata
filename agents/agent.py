@@ -26,7 +26,7 @@ from google.adk.tools import (
     FunctionTool,
     agent_tool,
     google_search,
-    built_in_code_execution,
+    #built_in_code_execution,
 )
 from google.adk.sessions import InMemorySessionService
 from google.genai import types as adk_types
@@ -439,10 +439,8 @@ list_drive_files_tool = FunctionTool(func=list_drive_files)
 get_drive_file_metadata_tool = FunctionTool(func=get_drive_file_metadata)
 
 
-# --- Define ADK Agents ---
-# General Purpose Agents
 search_agent = Agent(name="SearchAgent", model='gemini-2.0-flash-lite', tools=[google_search])
-coding_agent = Agent(name="CodeAgent", model='gemini-2.0-flash-lite', tools=[built_in_code_execution])
+#coding_agent = Agent(name="CodeAgent", model='gemini-2.0-flash-lite', tools=[built_in_code_execution])
 
 # Specialized Google Service Agents
 user_profile_agent = Agent(name="UserProfileAgent", model='gemini-2.0-flash-lite', tools=[get_user_profile_tool])
@@ -491,7 +489,6 @@ root_agent = Agent(
 
     *** DELEGATION RULES ***
     -   For Web or Google search use : `SearchAgent`.
-    -   For Code execution: `CodeAgent`.
     -   Get user info (name, email): `UserProfileAgent`.
     -   To read the content of the most recent email matching a search query (e.g., "read my last email from bob"): `GmailReadAgent`.
     -   To get a LIST of emails matching a query (e.g., "show me the last 5 emails from HR"): `GmailSearchAgent`.
@@ -520,7 +517,7 @@ root_agent = Agent(
         agent_tool.AgentTool(agent=drive_search_agent),
         agent_tool.AgentTool(agent=drive_get_file_agent),
         agent_tool.AgentTool(agent=search_agent),
-        agent_tool.AgentTool(agent=coding_agent),
+        #agent_tool.AgentTool(agent=coding_agent),
         agent_tool.AgentTool(agent=user_profile_agent),
         agent_tool.AgentTool(agent=gmail_send_agent),
     ],
