@@ -439,11 +439,11 @@ list_drive_files_tool = FunctionTool(func=list_drive_files)
 get_drive_file_metadata_tool = FunctionTool(func=get_drive_file_metadata)
 
 
-search_agent = Agent(name="SearchAgent", model='gemini-2.0-flash-lite', tools=[google_search])
+search_agent = Agent(name="SearchAgent", model='gemini-2.0-flash-lite',instruction="Used to search Google for any needed realtime information which either the user requests for or the agent requires to perform other tasks, or to retrieve realtime information/research to answer user's queries better",tools=[google_search])
 #coding_agent = Agent(name="CodeAgent", model='gemini-2.0-flash-lite', tools=[built_in_code_execution])
 
 # Specialized Google Service Agents
-user_profile_agent = Agent(name="UserProfileAgent", model='gemini-2.0-flash-lite', tools=[get_user_profile_tool])
+user_profile_agent = Agent(name="UserProfileAgent", model='gemini-2.0-flash-lite',instruction ="Retrieves the useful profile information like username and google email address of the user prompting the agent.", tools=[get_user_profile_tool])
 gmail_send_agent = Agent(name="GmailSendAgent", model='gemini-2.0-flash-lite', tools=[send_email_tool])
 
 gmail_read_agent = Agent(
@@ -479,7 +479,7 @@ drive_get_file_agent = Agent(
 
 root_agent = Agent(
     name="RootAgent",
-    model="gemini-2.0-flash-lite",
+    model="gemini-2.0-flash",
     instruction="""You are the main coordinator. Your job is to understand the user's request and delegate to the correct specialist agent.
 
     *** AUTHENTICATION WORKFLOW (MANDATORY) ***
@@ -488,8 +488,8 @@ root_agent = Agent(
     3.  Only after successful authentication can you delegate to a specialist agent.
 
     *** DELEGATION RULES ***
-    -   For Web or Google search use : `SearchAgent`.
-    -   Get user info (name, email): `UserProfileAgent`.
+    -   For Web or Google search or realtime information or to research about some information that you dont already posses and require to perform task then use : `SearchAgent`.
+    -   If any request whatsover needs user information such as username(can be used in email, search queries, etc...) and email(needed when for example queries like: send an email to myself , or for appending this email in some document in drive , or in calender or in send email's itself) or whenever user asks to perform a toolcall involving 'myself', "mine", "I" to use as a prerequisite for a different tool callGet -> for all these use cases use:- user info (name, email): `UserProfileAgent`.
     -   To read the content of the most recent email matching a search query (e.g., "read my last email from bob"): `GmailReadAgent`.
     -   To get a LIST of emails matching a query (e.g., "show me the last 5 emails from HR"): `GmailSearchAgent`.
     -   To read a specific email when you already have its message ID: `GmailGetEmailAgent`.
@@ -506,6 +506,15 @@ root_agent = Agent(
         3.  Once the user specifies which one to read, delegate to `GmailGetEmailAgent` with the chosen `message_id`.
     -   **Simple Email Reading**: For direct requests to read an email ("read my latest email from Acme Inc."), delegate directly to `GmailReadAgent`.
     -   **Reading Drive Files**: First, delegate to `DriveSearchAgent` to find the file and get its `id`. Second, delegate to `DriveGetFileAgent` with that `id` to get its details.
+    
+    ***GENERAL GUIDELINES***
+    - Always reason and use the user's date and time sent with the request to use queries for any date or time related instead of reprompting the user.
+    - Use Google search incase user asks for any information that is not already present in the user's profile or previous interactions, or if the user asks for some realtime information that you dont already possess. You can also use it whenever you need more information.
+    - Avoid reprompting the user for information that can be derived from their profile or previous interactions, or even info that can be retrieved with a toolcall.
+    - Reason and make some assumptions wherever needed to be most likely if the user doesnt give high clarity in their requests. Like for example if they say for the past week - then reason that the past week will be the past week until last Sunday and not last 7 days, or when they just say create an event on 16th June when the current user date is 15th of June 2025 , then assume that they are talking about they year 2025 and not 2024 or 2026, etc.
+    - Avoid reprompting the user multiple times for the same information. If you need to ask for something, do it once and use that information for all subsequent tool calls.
+    - Answer the user's what is the date and time question with the current date and time in UTC passed by the user in the context of the request.
+    - The user/client's system time is not confidential or sensitive , you can use it or tell it if the user asks for it.
     """,
     tools=[
         setup_google_auth_tool,
