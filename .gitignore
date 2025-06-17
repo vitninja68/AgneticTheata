@@ -5,5 +5,3 @@ venv
 token.pickle
 agents/credentials-old.json
 /.env
-# Ignore Python cache files
-/agents/__pycache__
