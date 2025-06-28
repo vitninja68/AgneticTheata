@@ -1,6 +1,7 @@
 venv
 #/agents/.env
 /agents/token
+/__pycache__
 /agents/credentials.json
 token.pickle
 agents/credentials-old.json
